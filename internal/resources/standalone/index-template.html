@@ -86,6 +86,10 @@
       padding-left: 4px;
     }
 
+    .target-item {
+      font-size: 125%;
+    }
+
     img.grpc-logo {
       width: 80px;
       margin-bottom: 6px;
@@ -112,7 +116,9 @@
     <div class="full-width-heading">
       <div class="heading">
         <h1><img class="grpc-logo" src="grpc-logo.svg" alt="GRPC"/> Web UI</h1>
-        {{ if not (eq .Target "") }}
+        {{ if (eq .Target "") }}
+          <h2>Servers</h2>
+        {{ else }}
           <h2>Connected to <span class="target">{{ .Target }}</span></h2>
         {{ end }}
       </div>
