@@ -60,10 +60,14 @@ var (
 	key = flags.String("key", "", prettify(`
 		File containing client private key, to present to the server. Not valid
 		with -plaintext option. Must also provide -cert option.`))
+	mode = flags.String("mode", "single", prettify(`
+		If set to "multi", allows to connect to multiple servers,
+		specified with "-t" parameter.`))
 	protoset    multiString
 	protoFiles  multiString
 	importPaths multiString
 	reflHeaders multiString
+	targets     multiString
 	authority   = flags.String("authority", "", prettify(`
 		Value of :authority pseudo-header to be use with underlying HTTP/2
 		requests. It defaults to the given address.`))
@@ -97,6 +101,8 @@ var (
 		The address on which the web UI is exposed.`))
 	services multiString
 	methods  multiString
+
+	targetMap = map[string]string{}
 )
 
 func init() {
@@ -142,6 +148,9 @@ func init() {
 		a -method flag. Method names must be fully-qualified and may either use
 		a dot (".") or a slash ("/") to separate the fully-qualified service
 		name from the method's name.`))
+	flags.Var(&targets, "t", prettify(`
+		List of target servers. If mode set to "multi", allows web UI to connect
+		to multiple servers.`))
 }
 
 type multiString []string
@@ -194,10 +203,24 @@ func main() {
 		fail(nil, "The -cert and -key arguments must be used together and both be present.")
 	}
 
-	if flags.NArg() != 1 {
-		fail(nil, "This program requires exactly one arg: the host:port of gRPC server.")
+	if *mode == "single" {
+		if flags.NArg() != 1 {
+			fail(nil, "This program requires exactly one arg: the host:port of gRPC server.")
+		}
+		targetMap["target"] = flags.Arg(0)
 	}
-	target := flags.Arg(0)
+	if *mode == "multi" {
+		if len(targets) == 0 {
+			fail(nil, "At least one server should be specified in the following format -t name=address:port")
+		}
+		for _, target := range targets {
+			s := strings.Split(target, "=")
+			if len(s) != 2 {
+				fail(nil, "Invalid target format %s", target)
+			}
+			targetMap[strings.TrimSpace(s[0])] = strings.TrimSpace(s[1])
+		}
+	}
 
 	if len(protoset) > 0 && len(reflHeaders) > 0 {
 		warn("The -reflect-header argument is not used when -protoset files are used.")
@@ -207,11 +230,6 @@ func main() {
 	}
 	if len(importPaths) > 0 && len(protoFiles) == 0 {
 		warn("The -import-path argument is not used unless -proto files are used.")
-	}
-
-	configs, err := computeSvcConfigs()
-	if err != nil {
-		fail(err, "Invalid services/methods indicated")
 	}
 
 	if *veryVeryVerbose {
@@ -273,117 +291,73 @@ func main() {
 	if isUnixSocket != nil && isUnixSocket() {
 		network = "unix"
 	}
-	cc, err := grpcurl.BlockingDial(ctx, network, target, creds, opts...)
-	if err != nil {
-		fail(err, "Failed to dial target host %q", target)
-	}
 
-	var descSource grpcurl.DescriptorSource
-	var refClient *grpcreflect.Client
-	if len(protoset) > 0 {
-		var err error
-		descSource, err = grpcurl.DescriptorSourceFromProtoSets(protoset...)
+	for name, target := range targetMap {
+		configs, err := computeSvcConfigs()
 		if err != nil {
-			fail(err, "Failed to process proto descriptor sets.")
+			fail(err, "Invalid services/methods indicated")
 		}
-	} else if len(protoFiles) > 0 {
-		var err error
-		descSource, err = grpcurl.DescriptorSourceFromProtoFiles(importPaths, protoFiles...)
-		if err != nil {
-			fail(err, "Failed to process proto source files.")
-		}
-	} else {
-		md := grpcurl.MetadataFromHeaders(reflHeaders)
-		refCtx := metadata.NewOutgoingContext(ctx, md)
-		refClient = grpcreflect.NewClient(refCtx, reflectpb.NewServerReflectionClient(cc))
-		descSource = grpcurl.DescriptorSourceFromServer(ctx, refClient)
-	}
 
-	// arrange for the RPCs to be cleanly shutdown
-	reset := func() {
+		cc, err := grpcurl.BlockingDial(ctx, network, target, creds, opts...)
+		if err != nil {
+			fail(err, "Failed to dial target host %q", target)
+		}
+
+		var descSource grpcurl.DescriptorSource
+		var refClient *grpcreflect.Client
+		if len(protoset) > 0 {
+			var err error
+			descSource, err = grpcurl.DescriptorSourceFromProtoSets(protoset...)
+			if err != nil {
+				fail(err, "Failed to process proto descriptor sets.")
+			}
+		} else if len(protoFiles) > 0 {
+			var err error
+			descSource, err = grpcurl.DescriptorSourceFromProtoFiles(importPaths, protoFiles...)
+			if err != nil {
+				fail(err, "Failed to process proto source files.")
+			}
+		} else {
+			md := grpcurl.MetadataFromHeaders(reflHeaders)
+			refCtx := metadata.NewOutgoingContext(ctx, md)
+			refClient = grpcreflect.NewClient(refCtx, reflectpb.NewServerReflectionClient(cc))
+			descSource = grpcurl.DescriptorSourceFromServer(ctx, refClient)
+		}
+
+		// arrange for the RPCs to be cleanly shutdown
+		reset := func() {
+			if refClient != nil {
+				refClient.Reset()
+				refClient = nil
+			}
+			if cc != nil {
+				cc.Close()
+				cc = nil
+			}
+		}
+		defer reset()
+		exit = func(code int) {
+			// since defers aren't run by os.Exit...
+			reset()
+			os.Exit(code)
+		}
+
+		methods, err := getMethods(descSource, configs)
+		if err != nil {
+			fail(err, "Failed to compute set of methods to expose")
+		}
+		allFiles, err := grpcurl.GetAllFiles(descSource)
+		if err != nil {
+			fail(err, "Failed to enumerate all proto files")
+		}
+
+		// can go ahead and close reflection client now
 		if refClient != nil {
 			refClient.Reset()
 			refClient = nil
 		}
-		if cc != nil {
-			cc.Close()
-			cc = nil
-		}
-	}
-	defer reset()
-	exit = func(code int) {
-		// since defers aren't run by os.Exit...
-		reset()
-		os.Exit(code)
-	}
 
-	methods, err := getMethods(descSource, configs)
-	if err != nil {
-		fail(err, "Failed to compute set of methods to expose")
-	}
-	allFiles, err := grpcurl.GetAllFiles(descSource)
-	if err != nil {
-		fail(err, "Failed to enumerate all proto files")
-	}
-
-	// can go ahead and close reflection client now
-	if refClient != nil {
-		refClient.Reset()
-		refClient = nil
-	}
-
-	handler := standalone.Handler(cc, target, methods, allFiles)
-	if *maxTime > 0 {
-		timeout := time.Duration(*maxTime * float64(time.Second))
-		// enforce the timeout by wrapping the handler and inserting a
-		// context timeout for invocation calls
-		orig := handler
-		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/invoke/") {
-				ctx, cancel := context.WithTimeout(r.Context(), timeout)
-				defer cancel()
-				r = r.WithContext(ctx)
-			}
-			orig.ServeHTTP(w, r)
-		})
-	}
-
-	if *verbose {
-		// wrap the handler with one that performs more logging of what's going on
-		orig := handler
-		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-
-			if *veryVerbose {
-				if req, err := httputil.DumpRequest(r, *veryVeryVerbose); err != nil {
-					logErrorf("could not dump request: %v", err)
-				} else {
-					logInfof("received request:\n%s", string(req))
-				}
-				var recorder httptest.ResponseRecorder
-				if *veryVeryVerbose {
-					recorder.Body = &bytes.Buffer{}
-				}
-				tee := teeWriter{w: []http.ResponseWriter{w, &recorder}}
-				w = &tee
-				defer func() {
-					// in case handler never called Write or WriteHeader:
-					tee.mirrorHeaders()
-
-					if resp, err := httputil.DumpResponse(recorder.Result(), *veryVeryVerbose); err != nil {
-						logErrorf("could not dump response: %v", err)
-					} else {
-						logInfof("sent response:\n%s", string(resp))
-					}
-				}()
-			}
-
-			cs := codeSniffer{w: w}
-			orig.ServeHTTP(&cs, r)
-
-			millis := time.Since(start).Nanoseconds() / (1000 * 1000)
-			logInfof("%s %s %s %d %dms %dbytes", r.RemoteAddr, r.Method, r.RequestURI, cs.code, millis, cs.size)
-		})
+		addHandler(cc, name, target, methods, allFiles, *mode)
 	}
 
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", *bind, *port))
@@ -392,9 +366,10 @@ func main() {
 	}
 	fmt.Printf("gRPC Web UI available at http://%s:%d/\n", *bind, listener.Addr().(*net.TCPAddr).Port)
 
-	if err := http.Serve(listener, handler); err != nil {
+	if err := http.Serve(listener, nil); err != nil {
 		fail(err, "Failed to serve web UI")
 	}
+	http.Serve(listener, nil)
 }
 
 func usage() {
@@ -460,6 +435,69 @@ func fail(err error, msg string, args ...interface{}) {
 type svcConfig struct {
 	includeService bool
 	includeMethods map[string]struct{}
+}
+
+func addHandler(clientCon *grpc.ClientConn, name string, target string, methods []*desc.MethodDescriptor, allFiles []*desc.FileDescriptor, mode string) {
+	handler := standalone.Handler(clientCon, target, methods, allFiles)
+
+	if *maxTime > 0 {
+		timeout := time.Duration(*maxTime * float64(time.Second))
+		// enforce the timeout by wrapping the handler and inserting a
+		// context timeout for invocation calls
+		orig := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/invoke/") {
+				ctx, cancel := context.WithTimeout(r.Context(), timeout)
+				defer cancel()
+				r = r.WithContext(ctx)
+			}
+			orig.ServeHTTP(w, r)
+		})
+	}
+
+	if *verbose {
+		// wrap the handler with one that performs more logging of what's going on
+		orig := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+
+			if *veryVerbose {
+				if req, err := httputil.DumpRequest(r, *veryVeryVerbose); err != nil {
+					logErrorf("could not dump request: %v", err)
+				} else {
+					logInfof("received request:\n%s", string(req))
+				}
+				var recorder httptest.ResponseRecorder
+				if *veryVeryVerbose {
+					recorder.Body = &bytes.Buffer{}
+				}
+				tee := teeWriter{w: []http.ResponseWriter{w, &recorder}}
+				w = &tee
+				defer func() {
+					// in case handler never called Write or WriteHeader:
+					tee.mirrorHeaders()
+
+					if resp, err := httputil.DumpResponse(recorder.Result(), *veryVeryVerbose); err != nil {
+						logErrorf("could not dump response: %v", err)
+					} else {
+						logInfof("sent response:\n%s", string(resp))
+					}
+				}()
+			}
+
+			cs := codeSniffer{w: w}
+			orig.ServeHTTP(&cs, r)
+
+			millis := time.Since(start).Nanoseconds() / (1000 * 1000)
+			logInfof("%s %s %s %d %dms %dbytes", r.RemoteAddr, r.Method, r.RequestURI, cs.code, millis, cs.size)
+		})
+	}
+
+	if mode == "single" {
+		http.Handle("/", handler)
+	} else {
+		http.Handle(fmt.Sprintf("/%s/", name), http.StripPrefix(fmt.Sprintf("/%s", name), handler))
+	}
 }
 
 func getMethods(source grpcurl.DescriptorSource, configs map[string]*svcConfig) ([]*desc.MethodDescriptor, error) {
