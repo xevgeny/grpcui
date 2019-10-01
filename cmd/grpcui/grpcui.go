@@ -232,6 +232,11 @@ func main() {
 		warn("The -import-path argument is not used unless -proto files are used.")
 	}
 
+	configs, err := computeSvcConfigs()
+	if err != nil {
+		fail(err, "Invalid services/methods indicated")
+	}
+
 	if *veryVeryVerbose {
 		// very-very verbose implies very verbose
 		*veryVerbose = true
@@ -293,11 +298,6 @@ func main() {
 	}
 
 	for name, target := range targetMap {
-		configs, err := computeSvcConfigs()
-		if err != nil {
-			fail(err, "Invalid services/methods indicated")
-		}
-
 		cc, err := grpcurl.BlockingDial(ctx, network, target, creds, opts...)
 		if err != nil {
 			fail(err, "Failed to dial target host %q", target)
