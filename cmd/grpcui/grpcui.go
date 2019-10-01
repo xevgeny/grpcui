@@ -373,7 +373,6 @@ func main() {
 	if err := http.Serve(listener, nil); err != nil {
 		fail(err, "Failed to serve web UI")
 	}
-	http.Serve(listener, nil)
 }
 
 func usage() {
