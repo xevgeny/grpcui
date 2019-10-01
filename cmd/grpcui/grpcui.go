@@ -360,6 +360,10 @@ func main() {
 		addHandler(cc, name, target, methods, allFiles, *mode)
 	}
 
+	if *mode == "multi" {
+		http.Handle("/", standalone.ListHandler(targetMap))
+	}
+
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", *bind, *port))
 	if err != nil {
 		fail(err, "Failed to listen on port %d", *port)
