@@ -1,0 +1,7 @@
+<div id="grpc-form">
+  {{ range $name, $t := .TargetMap }}
+  <div class="grpc-select">
+    <span class="target-item">📁 {{ $t }} <a href="/{{ $name }}">{{ $name }}</a></span>
+  </div>
+  {{ end }}
+</div>
