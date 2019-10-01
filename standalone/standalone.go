@@ -37,49 +37,10 @@ const csrfHeaderName = "x-grpcui-csrf-token"
 // be handling a sub-path (e.g. handling "/rpc-ui/") then use http.StripPrefix.
 func Handler(ch grpcdynamic.Channel, target string, methods []*desc.MethodDescriptor, files []*desc.FileDescriptor) http.Handler {
 	webFormHTML := grpcui.WebFormContents("invoke", "metadata", methods)
-	webFormJS := grpcui.WebFormScript()
-	webFormCSS := grpcui.WebFormSampleCSS()
+	contents := getIndexContents(target, webFormHTML)
 
 	var mux http.ServeMux
-
-	for _, assetName := range standalone.AssetNames() {
-		// the index file will be handled separately
-		if assetName == standalone.IndexTemplateName {
-			continue
-		}
-		resourcePath := "/" + assetName
-		mux.Handle(resourcePath, &resource{
-			Data:        standalone.MustAsset(assetName),
-			ContentType: mime.TypeByExtension(path.Ext(resourcePath)),
-			ETag:        resourceETags[resourcePath],
-		})
-	}
-
-	mux.Handle("/grpc-web-form.js", &resource{
-		Data:        webFormJS,
-		ContentType: "text/javascript; charset=UTF-8",
-		ETag:        computeETag(webFormJS),
-	})
-	mux.Handle("/grpc-web-form.css", &resource{
-		Data:        webFormCSS,
-		ContentType: "text/css; charset=utf-8",
-		ETag:        computeETag(webFormCSS),
-	})
-
-	indexContents := getIndexContents(target, webFormHTML)
-	indexResource := &resource{
-		Data:        indexContents,
-		ContentType: "text/html; charset=utf-8",
-		ETag:        computeETag(indexContents),
-	}
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			indexResource.ServeHTTP(w, r)
-		} else {
-			http.NotFound(w, r)
-		}
-	})
+	addPageHandlers(&mux, contents)
 
 	rpcInvokeHandler := http.StripPrefix("/invoke", grpcui.RPCInvokeHandler(ch, methods))
 	mux.HandleFunc("/invoke/", func(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +74,77 @@ func Handler(ch grpcdynamic.Channel, target string, methods []*desc.MethodDescri
 
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// ListHandler returns list of gRPC services.
+func ListHandler(targetMap map[string]string) http.Handler {
+	webFormHTML := getListContents(targetMap)
+	contents := getIndexContents("", webFormHTML)
+
+	var mux http.ServeMux
+	addPageHandlers(&mux, contents)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func addPageHandlers(mux *http.ServeMux, contents []byte) {
+	webFormJS := grpcui.WebFormScript()
+	webFormCSS := grpcui.WebFormSampleCSS()
+
+	for _, assetName := range standalone.AssetNames() {
+		// the index file will be handled separately
+		if assetName == standalone.IndexTemplateName {
+			continue
+		}
+		resourcePath := "/" + assetName
+		mux.Handle(resourcePath, &resource{
+			Data:        standalone.MustAsset(assetName),
+			ContentType: mime.TypeByExtension(path.Ext(resourcePath)),
+			ETag:        resourceETags[resourcePath],
+		})
+	}
+
+	mux.Handle("/grpc-web-form.js", &resource{
+		Data:        webFormJS,
+		ContentType: "text/javascript; charset=UTF-8",
+		ETag:        computeETag(webFormJS),
+	})
+	mux.Handle("/grpc-web-form.css", &resource{
+		Data:        webFormCSS,
+		ContentType: "text/css; charset=utf-8",
+		ETag:        computeETag(webFormCSS),
+	})
+
+	indexResource := &resource{
+		Data:        contents,
+		ContentType: "text/html; charset=utf-8",
+		ETag:        computeETag(contents),
+	}
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			indexResource.ServeHTTP(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+}
+
+var listTemplate = template.Must(template.New("list.html").Parse(string(standalone.ListTemplate())))
+
+func getListContents(targetMap map[string]string) []byte {
+	data := struct {
+		TargetMap map[string]string
+	}{
+		TargetMap: targetMap,
+	}
+	var buf bytes.Buffer
+	if err := listTemplate.Execute(&buf, data); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
 }
 
 var indexTemplate = template.Must(template.New("index.html").Parse(string(standalone.IndexTemplate())))
